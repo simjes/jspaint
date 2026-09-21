@@ -20,6 +20,9 @@ Thumbs.db
 # temporary files when using git subrepo
 .git-rewrite/
 
+# local overrides for PARTYKIT_HOST/MULTIPLAYER_ROOM_ID, see .env.example
+.env
+
 # generated from the PARTYKIT_HOST env var, see scripts/generate-multiplayer-config.js
 src/multiplayer-config.js
 
