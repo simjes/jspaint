@@ -435,6 +435,7 @@ interface Window {
 		};
 		set_theme: (theme_file_name: string) => void;
 		$: JQueryStatic;
+		readonly is_multiplayer_connected: boolean;
 	};
 
 	// app-localization.js

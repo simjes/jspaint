@@ -173,19 +173,6 @@ context("visual tests", () => {
 		cy.get(".window:visible").matchImageSnapshot(withMuchTextCompareOptions);
 	});
 
-	it("flip and rotate window", () => {
-		clickMenuButton("Image");
-		clickMenuItem("Flip/Rotate");
-		cy.get(".window:visible").matchImageSnapshot(withMuchTextCompareOptions);
-	});
-
-	it("stretch and skew window", () => {
-		clickMenuButton("Image");
-		clickMenuItem("Stretch/Skew");
-		waitForImage(".window:visible img");
-		cy.get(".window:visible").matchImageSnapshot(withTextCompareOptions);
-	});
-
 	it("help window", () => {
 		clickMenuButton("Help");
 		clickMenuItem("Help Topics");
@@ -202,15 +189,16 @@ context("visual tests", () => {
 	});
 
 	const toggleEyeGazeMode = () => {
-		// Eye Gaze Mode has been split into several features.
+		// Eye Gaze Mode has been split into several features. Quick Undo Button
+		// and Dwell Clicker no longer have Extras menu items (removed along
+		// with several other items), but the underlying URL-hash-driven
+		// features are unchanged, so set those hash flags directly instead of
+		// clicking a menu item that no longer exists.
+		cy.window().then((win) => {
+			win.location.hash += ",easy-undo,dwell-clicker";
+		});
 		clickMenuButton("Extras");
 		clickMenuItem("Vertical Color Box");
-		closeMenus();
-		clickMenuButton("Extras");
-		clickMenuItem("Quick Undo Button");
-		closeMenus();
-		clickMenuButton("Extras");
-		clickMenuItem("Dwell Clicker");
 		closeMenus();
 		clickMenuButton("Extras");
 		clickMenuItem("Enlarge UI");

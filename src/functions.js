@@ -10,18 +10,29 @@ import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 // import { localize } from "./app-localization.js";
 import { default_palette } from "./color-data.js";
 import { image_formats } from "./file-format-data.js";
-import { $G, E, TAU, debounce, from_canvas_coords, get_help_folder_icon, get_icon_for_tool, get_rgba_from_color, is_discord_embed, is_pride_month, make_canvas, render_access_key, to_canvas_coords } from "./helpers.js";
-import { apply_image_transformation, draw_grid, draw_selection_box, flip_horizontal, flip_vertical, invert_monochrome, invert_rgb, rotate, stretch_and_skew, threshold_black_and_white } from "./image-manipulation.js";
-import { show_imgur_uploader } from "./imgur.js";
+import { $G, E, TAU, debounce, from_canvas_coords, get_help_folder_icon, get_icon_for_tool, get_rgba_from_color, is_admin_connection, is_discord_embed, is_multiplayer_mode, is_pride_month, make_canvas, render_access_key, to_canvas_coords } from "./helpers.js";
+import { draw_grid, draw_selection_box } from "./image-manipulation.js";
 import { showMessageBox } from "./msgbox.js";
 import { localStore } from "./storage.js";
-import { TOOL_CURVE, TOOL_FREE_FORM_SELECT, TOOL_POLYGON, TOOL_SELECT, TOOL_TEXT, tools } from "./tools.js";
+import { TOOL_CURVE, TOOL_ERASER, TOOL_FILL, TOOL_FREE_FORM_SELECT, TOOL_POLYGON, TOOL_SELECT, TOOL_TEXT, tools } from "./tools.js";
 // `sessions.js` must be loaded after `app.js`
 // This would cause it to be loaded earlier, and error trying to access `undos`
 // I'm surprised I haven't been bitten by this sort of bug, and I've
 // mostly converted the whole app to ES Modules!
 // TODO: make sessions.js export function to initialize it
 // import { new_local_session } from "./sessions.js";
+
+// Tools that require an admin connection on a shared canvas (see
+// is_multiplayer_mode). Anyone can draw additively; these are gated because
+// they can move, replace, or remove existing content (a selection can be
+// dragged, cut, or overwritten; pasting/typing inserts arbitrary content) -
+// consequences that aren't necessarily a single, reviewable stroke the way
+// pencil/brush/shapes are. Matches ADMIN_ONLY_TOOLS in the multiplayer
+// server for TOOL_ERASER specifically - the only one of these that actually
+// produces a patch the server can independently reject; the others don't
+// change pixels by themselves (selecting is a "soft" no-op until you act on
+// the selection), so gating tool selection here is what actually stops them.
+const ADMIN_ONLY_TOOL_IDS = new Set([TOOL_ERASER, TOOL_FILL, TOOL_SELECT, TOOL_FREE_FORM_SELECT, TOOL_TEXT]);
 
 // expresses order in the URL as well as type
 const param_types = {
@@ -1038,6 +1049,17 @@ function open_from_file(file, source_file_handle) {
 			});
 			return;
 		}
+		// Opening a file discards the current document/history wholesale (see
+		// open_from_image_info); on the shared canvas that would desync this
+		// visitor's local view from everyone else's. Blocked for everyone, not
+		// just non-admins - this menu item has been removed too, but this is
+		// also reachable by dragging a file onto the window, or (in the
+		// desktop app) opening a file from the OS, neither of which goes
+		// through the menu's disabled state.
+		if (is_multiplayer_mode) {
+			show_error_message(localize("This shared canvas can't be replaced by opening a file."));
+			return;
+		}
 		image_info.source_file_handle = source_file_handle;
 		open_from_image_info(image_info);
 	});
@@ -1082,66 +1104,6 @@ function load_theme_from_text(fileText) {
 	window.themeCSSProperties = cssProperties;
 
 	$G.triggerHandler("theme-load");
-}
-
-function file_new() {
-	are_you_sure(() => {
-		deselect();
-		cancel();
-
-		$G.triggerHandler("session-update"); // autosave old session
-		new_local_session();
-
-		reset_file();
-		reset_selected_colors();
-		reset_canvas_and_history(); // (with newly reset colors)
-		set_magnification(default_magnification);
-
-		$G.triggerHandler("session-update"); // autosave
-	});
-}
-
-async function file_open() {
-	const { file, fileHandle } = await systemHooks.showOpenFileDialog({ formats: image_formats });
-	open_from_file(file, fileHandle);
-}
-
-/** @type {OSGUI$Window} */
-let $file_load_from_url_window;
-function file_load_from_url() {
-	if ($file_load_from_url_window) {
-		$file_load_from_url_window.close();
-	}
-	const $w = $DialogWindow().addClass("horizontal-buttons");
-	$file_load_from_url_window = $w;
-	$w.title("Load from URL");
-	// @TODO: URL validation (input has to be in a form (and we don't want the form to submit))
-	$w.$main.html(`
-		<div style="padding: 10px;">
-			<label style="display: block; margin-bottom: 5px;" for="url-input">Paste or type the web address of an image:</label>
-			<input type="url" required value="" id="url-input" class="inset-deep" style="width: 300px;"/></label>
-		</div>
-	`);
-	const $input = $w.$main.find("#url-input");
-	// $w.$Button("Load", () => {
-	$w.$Button(localize("Open"), () => {
-		const uris = get_uris(String($input.val()));
-		if (uris.length > 0) {
-			// @TODO: retry loading if same URL entered
-			// actually, make it change the hash only after loading successfully
-			// (but still load from the hash when necessary)
-			// make sure it doesn't overwrite the old session before switching
-			$w.close();
-			change_url_param("load", uris[0]);
-		} else {
-			show_error_message("Invalid URL. It must include a protocol (https:// or http://)");
-		}
-	}, { type: "submit" });
-	$w.$Button(localize("Cancel"), () => {
-		$w.close();
-	});
-	$w.center();
-	$input[0].focus();
 }
 
 // Native FS API / File Access API allows you to overwrite files, but people are not used to it.
@@ -1817,6 +1779,15 @@ async function choose_file_to_paste() {
  * @param {HTMLImageElement | HTMLCanvasElement} img_or_canvas
  */
 function paste(img_or_canvas) {
+	// Pasting force-switches to the Select tool internally (below), which
+	// would get blocked by select_tool()'s own admin check - but by then
+	// we'd already be committed to inserting the image. Guard here too so
+	// nothing happens at all for a non-admin, rather than a half-completed
+	// paste with the wrong tool active.
+	if (is_multiplayer_mode && !is_admin_connection) {
+		show_error_message(localize("Only an admin can paste images."));
+		return;
+	}
 
 	if (img_or_canvas.width > main_canvas.width || img_or_canvas.height > main_canvas.height) {
 		const message = localize("The image in the clipboard is larger than the bitmap.") + "\n" +
@@ -1891,115 +1862,6 @@ function paste(img_or_canvas) {
 		}, () => {
 			selection = new OnCanvasSelection(x, y, img_or_canvas.width, img_or_canvas.height, img_or_canvas);
 		});
-	}
-}
-
-function render_history_as_gif() {
-	const $win = $DialogWindow();
-	$win.title("Rendering GIF");
-
-	const $output = $win.$main;
-	const $progress = $(E("progress")).appendTo($output).addClass("inset-deep");
-	const $progress_percent = $(E("span")).appendTo($output).css({
-		width: "2.3em",
-		display: "inline-block",
-		textAlign: "center",
-	});
-	$win.$main.css({ padding: 5 });
-
-	const $cancel = $win.$Button("Cancel", () => {
-		$win.close();
-	}).focus();
-
-	$win.center();
-
-	try {
-		const width = main_canvas.width;
-		const height = main_canvas.height;
-		const gif = new GIF({
-			//workers: Math.min(5, Math.floor(undos.length/50)+1),
-			workerScript: "lib/gif.js/gif.worker.js",
-			width,
-			height,
-		});
-
-		$win.on("close", () => {
-			gif.abort();
-		});
-
-		gif.on("progress", (p) => {
-			$progress.val(p);
-			$progress_percent.text(`${~~(p * 100)}%`);
-		});
-
-		gif.on("finished", (blob) => {
-			$win.title("Rendered GIF");
-			const blob_url = URL.createObjectURL(blob);
-			$output.empty().append(
-				$(E("div")).addClass("inset-deep").append(
-					$(E("img")).attr({
-						src: blob_url,
-						width,
-						height,
-					}).css({
-						display: "block", // prevent margin below due to inline display (vertical-align can also be used)
-					}),
-				).css({
-					overflow: "auto",
-					maxHeight: "70vh",
-					maxWidth: "70vw",
-				})
-			);
-			$win.on("close", () => {
-				// revoking on image load(+error) breaks right click > "Save image as" and "Open image in new tab"
-				URL.revokeObjectURL(blob_url);
-			});
-			$win.$Button("Upload to Imgur", () => {
-				$win.close();
-				sanity_check_blob(blob, () => {
-					show_imgur_uploader(blob);
-				});
-			}).focus();
-			$win.$Button(localize("Save"), () => {
-				$win.close();
-				sanity_check_blob(blob, () => {
-					const suggested_file_name = `${file_name.replace(/\.(bmp|dib|a?png|gif|jpe?g|jpe|jfif|tiff?|webp|raw)$/i, "")} history.gif`;
-					systemHooks.showSaveFileDialog({
-						dialogTitle: localize("Save As"), // localize("Save Animation As"),
-						getBlob: () => blob,
-						defaultFileName: suggested_file_name,
-						defaultPath: typeof system_file_handle === "string" ? `${system_file_handle.replace(/[/\\][^/\\]*/, "")}/${suggested_file_name}` : null,
-						defaultFileFormatID: "image/gif",
-						formats: [{
-							formatID: "image/gif",
-							mimeType: "image/gif",
-							name: localize("Animated GIF (*.gif)").replace(/\s+\([^(]+$/, ""),
-							nameWithExtensions: localize("Animated GIF (*.gif)"),
-							extensions: ["gif"],
-						}],
-					});
-				});
-			});
-			$cancel.appendTo($win.$buttons);
-			$win.center();
-		});
-
-		const gif_canvas = make_canvas(width, height);
-		const frame_history_nodes = [...undos, current_history_node];
-		for (const frame_history_node of frame_history_nodes) {
-			gif_canvas.ctx.clearRect(0, 0, gif_canvas.width, gif_canvas.height);
-			gif_canvas.ctx.putImageData(frame_history_node.image_data, 0, 0);
-			if (frame_history_node.selection_image_data) {
-				const selection_canvas = make_canvas(frame_history_node.selection_image_data);
-				gif_canvas.ctx.drawImage(selection_canvas, frame_history_node.selection_x, frame_history_node.selection_y);
-			}
-			gif.addFrame(gif_canvas, { delay: 200, copy: true });
-		}
-		gif.render();
-
-	} catch (err) {
-		$win.close();
-		show_error_message("Failed to render GIF.", err);
 	}
 }
 
@@ -2148,7 +2010,16 @@ function undoable({ name, icon, use_loose_canvas_changes, soft, assume_saved }, 
 	const image_data = main_ctx.getImageData(0, 0, main_canvas.width, main_canvas.height);
 
 	redos.length = 0;
-	undos.push(current_history_node);
+	// In multiplayer mode, undo/redo/history-navigation are permanently
+	// disabled (is_multiplayer_mode), so nothing ever reads back through
+	// `undos` - skip growing it forever. At a large fixed canvas size, each
+	// entry's full-canvas image_data can be tens to hundreds of MB, and this
+	// array was never pruned, so an ordinary drawing session would otherwise
+	// retain every single stroke's full snapshot for as long as the tab stays
+	// open, which would exhaust memory in minutes.
+	if (!is_multiplayer_mode) {
+		undos.push(current_history_node);
+	}
 
 	const new_history_node = make_history_node({
 		image_data,
@@ -2172,6 +2043,29 @@ function undoable({ name, icon, use_loose_canvas_changes, soft, assume_saved }, 
 	});
 	current_history_node.futures.push(new_history_node);
 	current_history_node = new_history_node;
+
+	// Free the one full-canvas snapshot that's no longer reachable as
+	// current_history_node or its immediate parent (multiplayer-bridge.js
+	// only ever diffs against current_history_node.parent.image_data, so
+	// that's the oldest snapshot still needed). Otherwise the parent chain
+	// itself - kept for that diffing, and because it's the same tree History
+	// Ctrl+Z would've used - would silently retain every past snapshot too.
+	//
+	// history_node_to_cancel_to is set for the entire duration of every tool
+	// gesture (cleared one line after pointerup's undoable() call, not
+	// before), so checking merely whether it's set would skip nulling for
+	// every ordinary single-commit stroke - the common case this exists to
+	// help. What actually needs protecting is just that one node: the Select
+	// tool (move/resize/invert/smear) can commit several undoables across a
+	// single gesture before the user hits Esc, and cancel() reverts all the
+	// way back to history_node_to_cancel_to - see its "will revert any
+	// changes from other users" comment above, an existing tradeoff this
+	// doesn't change. So skip nulling only in the specific case where the
+	// node about to be freed *is* that node.
+	const grandparent = new_history_node.parent && new_history_node.parent.parent;
+	if (is_multiplayer_mode && grandparent && grandparent !== history_node_to_cancel_to) {
+		grandparent.image_data = null;
+	}
 
 	$G.triggerHandler("history-update"); // update history view
 
@@ -2197,6 +2091,7 @@ function make_or_update_undoable(undoable_meta, undoable_action) {
 	}
 }
 function undo() {
+	if (is_multiplayer_mode) { return false; } // would rewind other users' work too; see is_multiplayer_mode
 	if (undos.length < 1) { return false; }
 
 	redos.push(current_history_node);
@@ -2216,6 +2111,7 @@ function undo() {
 /** @type {OSGUI$Window} */
 let $document_history_prompt_window;
 function redo() {
+	if (is_multiplayer_mode) { return false; } // would rewind other users' work too; see is_multiplayer_mode
 	if (redos.length < 1) {
 		if ($document_history_prompt_window) {
 			$document_history_prompt_window.close();
@@ -2259,6 +2155,12 @@ function get_history_ancestors(node) {
 let $document_history_window;
 // setTimeout(show_document_history, 100);
 function show_document_history() {
+	// Reachable via a keyboard shortcut too, bypassing the menu's disabled
+	// state; see is_multiplayer_mode.
+	if (is_multiplayer_mode) {
+		show_error_message(localize("Not available on a shared canvas, since navigating history would rewind other people's work too."));
+		return;
+	}
 	if ($document_history_prompt_window) {
 		$document_history_prompt_window.close();
 	}
@@ -2348,6 +2250,7 @@ function show_document_history() {
 			render_tree_from_node(sub_node);
 		}
 		$entry.on("click", () => {
+			if (is_multiplayer_mode) { return; } // would rewind other users' work too; see is_multiplayer_mode
 			go_to_history_node(node);
 		});
 		// @ts-ignore  (TODO: maybe don't tack properties onto objects so much!)
@@ -2531,6 +2434,14 @@ function delete_selection(meta = {}) {
 	}
 }
 function select_all() {
+	// Same reasoning as paste(): this force-switches tools internally, which
+	// select_tool() would block on its own, but only after we'd already
+	// committed to making a selection. Guard here so it's a clean no-op.
+	if (is_multiplayer_mode && !is_admin_connection) {
+		show_error_message(localize("Only an admin can use the %1 tool.", get_tool_by_id(TOOL_SELECT).name));
+		return;
+	}
+
 	deselect();
 	select_tool(get_tool_by_id(TOOL_SELECT));
 
@@ -2704,20 +2615,6 @@ async function edit_paste(execCommandFallback) {
 	}
 }
 
-function image_invert_colors() {
-	apply_image_transformation({
-		name: localize("Invert Colors"),
-		icon: get_help_folder_icon("p_invert.png"),
-	}, (_original_canvas, original_ctx, _new_canvas, new_ctx) => {
-		const monochrome_info = monochrome && detect_monochrome(original_ctx);
-		if (monochrome && monochrome_info.isMonochrome) {
-			invert_monochrome(original_ctx, new_ctx, monochrome_info);
-		} else {
-			invert_rgb(original_ctx, new_ctx);
-		}
-	});
-}
-
 function clear() {
 	deselect();
 	cancel();
@@ -2886,6 +2783,21 @@ function select_tools(tools) {
  * @param {boolean} [toggle]
  */
 function select_tool(tool, toggle) {
+	// We show the tools to the user even if they cannot use them to give
+	// the true feeling of shitty UX from back in the days.
+	// Matches ADMIN_ONLY_TOOLS in the multiplayer server (server.ts, now in
+	// the separate ggjh2027-multiplayer repo) for the eraser specifically -
+	// the server enforces that one independently of whatever the client
+	// shows. Select/Free-Form Select/Text don't themselves produce patches
+	// (selecting doesn't change pixels), so there's nothing for the server
+	// to reject there; blocking them here is what actually keeps a
+	// non-admin from moving, cutting, or overwriting existing content via a
+	// selection, or dropping arbitrary text onto the canvas.
+	if (is_multiplayer_mode && ADMIN_ONLY_TOOL_IDS.has(tool.id) && !is_admin_connection) {
+		show_error_message(localize("Only an admin can use the %1 tool.", tool.name));
+		return;
+	}
+
 	deselect();
 
 	if (!(selected_tools.length === 1 && selected_tool.deselect)) {
@@ -3094,25 +3006,6 @@ function switch_to_polychrome_palette() {
 
 }
 
-function make_opaque() {
-	undoable({
-		name: "Make Opaque",
-		icon: get_help_folder_icon("p_make_opaque.png"),
-	}, () => {
-		main_ctx.save();
-		main_ctx.globalCompositeOperation = "destination-atop";
-
-		main_ctx.fillStyle = selected_colors.background;
-		main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
-
-		// in case the selected background color is transparent/translucent
-		main_ctx.fillStyle = "white";
-		main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
-
-		main_ctx.restore();
-	});
-}
-
 /**
  * Resizes the canvas without saving the dimensions to local storage.
  *
@@ -3121,6 +3014,15 @@ function make_opaque() {
  * @param {{name?: string, icon?: HTMLImageElement | HTMLCanvasElement}} [undoable_meta={}] - overrides certain properties of ActionMetadata
  */
 function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_height, undoable_meta = {}) {
+	// The whole point of the shared canvas is that it's the same document for
+	// everyone; resizing it (even just cropping/extending, not just Attributes)
+	// would affect everyone's view, so it's disabled outright - for every
+	// visitor, admins included, not just gated by permission.
+	if (is_multiplayer_mode && (unclamped_width !== main_canvas.width || unclamped_height !== main_canvas.height)) {
+		show_error_message(localize("This shared canvas has a fixed size and can't be resized."));
+		return;
+	}
+
 	const new_width = Math.max(1, unclamped_width);
 	const new_height = Math.max(1, unclamped_height);
 	if (main_canvas.width !== new_width || main_canvas.height !== new_height) {
@@ -3173,449 +3075,6 @@ function resize_canvas_and_save_dimensions(unclamped_width, unclamped_height, un
 	}, (_error) => {
 		// oh well
 	});
-}
-
-function image_attributes() {
-	if (image_attributes.$window) {
-		image_attributes.$window.close();
-	}
-	const $w = image_attributes.$window = $DialogWindow(localize("Attributes"));
-	$w.addClass("attributes-window");
-
-	const $main = $w.$main;
-
-	// Information
-
-	const table = {
-		[localize("File last saved:")]: localize("Not Available"), // @TODO: make available?
-		[localize("Size on disk:")]: localize("Not Available"), // @TODO: make available?
-		[localize("Resolution:")]: "72 x 72 dots per inch", // if localizing this, remove "direction" setting below
-	};
-	const $table = $(E("table")).appendTo($main);
-	for (const k in table) {
-		const $tr = $(E("tr")).appendTo($table);
-		$(E("td")).appendTo($tr).text(k);
-		const $value = $(E("td")).appendTo($tr).text(table[k]);
-		if (table[k].indexOf("72") !== -1) {
-			$value.css("direction", "ltr");
-		}
-	}
-
-	// Dimensions
-
-	const unit_sizes_in_px = { px: 1, in: 72, cm: 28.3465 };
-	let current_unit = image_attributes.unit = image_attributes.unit || "px";
-	let width_in_px = main_canvas.width;
-	let height_in_px = main_canvas.height;
-
-	const $width_label = $(E("label")).appendTo($main).html(render_access_key(localize("&Width:")));
-	const $height_label = $(E("label")).appendTo($main).html(render_access_key(localize("&Height:")));
-	const $width = $(E("input")).attr({ type: "number", min: 1, "aria-keyshortcuts": "Alt+W W W" }).addClass("no-spinner inset-deep").appendTo($width_label);
-	const $height = $(E("input")).attr({ type: "number", min: 1, "aria-keyshortcuts": "Alt+H H H" }).addClass("no-spinner inset-deep").appendTo($height_label);
-
-	$main.find("input")
-		.css({ width: "40px" })
-		.on("change keyup keydown keypress pointerdown pointermove paste drop", () => {
-			width_in_px = Number($width.val()) * unit_sizes_in_px[current_unit];
-			height_in_px = Number($height.val()) * unit_sizes_in_px[current_unit];
-		});
-
-	// Fieldsets
-
-	const $units = $(E("fieldset")).appendTo($main).append(`
-		<legend>${localize("Units")}</legend>
-		<div class="fieldset-body">
-			<div class="radio-field"><input type="radio" name="units" id="unit-in" value="in" aria-keyshortcuts="Alt+I I"><label for="unit-in">${render_access_key(localize("&Inches"))}</label></div>
-			<div class="radio-field"><input type="radio" name="units" id="unit-cm" value="cm" aria-keyshortcuts="Alt+M M"><label for="unit-cm">${render_access_key(localize("C&m"))}</label></div>
-			<div class="radio-field"><input type="radio" name="units" id="unit-px" value="px" aria-keyshortcuts="Alt+P P"><label for="unit-px">${render_access_key(localize("&Pixels"))}</label></div>
-		</div>
-	`);
-	$units.find(`[value=${current_unit}]`).attr({ checked: true });
-	$units.on("change", () => {
-		const new_unit = String($units.find(":checked").val());
-		$width.val(width_in_px / unit_sizes_in_px[new_unit]);
-		$height.val(height_in_px / unit_sizes_in_px[new_unit]);
-		current_unit = new_unit;
-	}).triggerHandler("change");
-
-	const $colors = $(E("fieldset")).appendTo($main).append(`
-		<legend>${localize("Colors")}</legend>
-		<div class="fieldset-body">
-			<div class="radio-field"><input type="radio" name="colors" id="attribute-monochrome" value="monochrome" aria-keyshortcuts="Alt+B B"><label for="attribute-monochrome">${render_access_key(localize("&Black and white"))}</label></div>
-			<div class="radio-field"><input type="radio" name="colors" id="attribute-polychrome" value="polychrome" aria-keyshortcuts="Alt+L L"><label for="attribute-polychrome">${render_access_key(localize("Co&lors"))}</label></div>
-		</div>
-	`);
-	$colors.find(`[value=${monochrome ? "monochrome" : "polychrome"}]`).attr({ checked: true });
-
-	const $transparency = $(E("fieldset")).appendTo($main).append(`
-		<legend>${localize("Transparency")}</legend>
-		<div class="fieldset-body">
-			<div class="radio-field"><input type="radio" name="transparency" id="attribute-transparent" value="transparent"><label for="attribute-transparent">${localize("Transparent")}</label></div>
-			<div class="radio-field"><input type="radio" name="transparency" id="attribute-opaque" value="opaque"><label for="attribute-opaque">${localize("Opaque")}</label></div>
-		</div>
-	`);
-	$transparency.find(`[value=${transparency ? "transparent" : "opaque"}]`).attr({ checked: true });
-
-	// Buttons on the right
-
-	$w.$Button(localize("OK"), () => {
-		const transparency_option = $transparency.find(":checked").val();
-		const colors_option = $colors.find(":checked").val();
-		const unit = String($units.find(":checked").val());
-
-		const was_monochrome = monochrome;
-		let monochrome_info;
-
-		image_attributes.unit = unit;
-		transparency = (transparency_option == "transparent");
-		monochrome = (colors_option == "monochrome");
-
-		if (monochrome != was_monochrome) {
-			if (selection) {
-				// want to detect monochrome based on selection + canvas
-				// simplest way to do that is to meld them together
-				meld_selection_into_canvas();
-			}
-			monochrome_info = detect_monochrome(main_ctx);
-
-			if (monochrome) {
-				if (monochrome_info.isMonochrome && monochrome_info.presentNonTransparentRGBAs.length === 2) {
-					palette = make_monochrome_palette(...monochrome_info.presentNonTransparentRGBAs);
-				} else {
-					palette = monochrome_palette;
-				}
-			} else {
-				palette = polychrome_palette;
-			}
-			selected_colors.foreground = palette[0];
-			selected_colors.background = palette[14]; // first in second row
-			selected_colors.ternary = "";
-			$colorbox.rebuild_palette();
-			$G.trigger("option-changed");
-		}
-
-		const unit_to_px = unit_sizes_in_px[unit];
-		const width = Number($width.val()) * unit_to_px;
-		const height = Number($height.val()) * unit_to_px;
-		resize_canvas_and_save_dimensions(~~width, ~~height);
-
-		if (!transparency && has_any_transparency(main_ctx)) {
-			make_opaque();
-		}
-
-		// 1. Must be after canvas resize to avoid weird undoable interaction and such.
-		// 2. Check that monochrome option changed, same as above.
-		//   a) for monochrome_info variable to be available
-		//   b) Consider the case where color is introduced to the canvas while in monochrome mode.
-		//      We only want to show this dialog if it would also change the palette (above), never leave you on an outdated palette.
-		//   c) And it's nice to be able to change other options without worrying about it trying to convert the document to monochrome.
-		if (monochrome != was_monochrome) {
-			if (monochrome && !monochrome_info.isMonochrome) {
-				show_convert_to_black_and_white();
-			}
-		}
-
-		image_attributes.$window.close();
-	}, { type: "submit" });
-
-	$w.$Button(localize("Cancel"), () => {
-		image_attributes.$window.close();
-	});
-
-	// Parsing HTML with jQuery; $Button takes text (not HTML) or Node/DocumentFragment
-	$w.$Button($.parseHTML(render_access_key(localize("&Default")))[0], () => {
-		width_in_px = default_canvas_width;
-		height_in_px = default_canvas_height;
-		$width.val(width_in_px / unit_sizes_in_px[current_unit]);
-		$height.val(height_in_px / unit_sizes_in_px[current_unit]);
-	}).attr("aria-keyshortcuts", "Alt+D D");
-
-	handle_keyshortcuts($w);
-
-	// Default focus
-
-	$width.select();
-
-	// Reposition the window
-
-	image_attributes.$window.center();
-}
-
-// TODO: maybe don't tack properties onto functions so much!?
-/**
- * @memberof image_attributes
- * @type {OSGUI$Window}
- */
-image_attributes.$window = null;
-/**
- * @memberof image_attributes
- * @type {string}
- */
-image_attributes.unit = "px";
-
-function show_convert_to_black_and_white() {
-	const $w = $DialogWindow("Convert to Black and White");
-	$w.addClass("convert-to-black-and-white");
-	$w.$main.append("<fieldset><legend>Threshold:</legend><input type='range' min='0' max='1' step='0.01' value='0.5'></fieldset>");
-	const $slider = $w.$main.find("input[type='range']");
-	const original_canvas = make_canvas(main_canvas);
-	let threshold;
-	const update_threshold = () => {
-		make_or_update_undoable({
-			name: "Make Monochrome",
-			match: (history_node) => history_node.name === "Make Monochrome",
-			icon: get_help_folder_icon("p_monochrome.png"),
-		}, () => {
-			threshold = Number($slider.val());
-			main_ctx.copy(original_canvas);
-			threshold_black_and_white(main_ctx, threshold);
-		});
-	};
-	update_threshold();
-	const update_threshold_soon = debounce(update_threshold, 100);
-	$slider.on("input", update_threshold_soon);
-
-	$w.$Button(localize("OK"), () => {
-		$w.close();
-	}, { type: "submit" }).focus();
-	$w.$Button(localize("Cancel"), () => {
-		if (current_history_node.name === "Make Monochrome") {
-			undo();
-		} else {
-			undoable({
-				name: "Cancel Make Monochrome",
-				icon: get_help_folder_icon("p_color.png"),
-			}, () => {
-				main_ctx.copy(original_canvas);
-			});
-		}
-		$w.close();
-	});
-	$w.center();
-}
-
-function image_flip_and_rotate() {
-	const $w = $DialogWindow(localize("Flip and Rotate"));
-	$w.addClass("flip-and-rotate");
-
-	const $fieldset = $(E("fieldset")).appendTo($w.$main);
-	$fieldset.append(`
-		<legend>${localize("Flip or rotate")}</legend>
-		<div class="radio-wrapper">
-			<input
-				type="radio"
-				name="flip-or-rotate"
-				id="flip-horizontal"
-				value="flip-horizontal"
-				aria-keyshortcuts="Alt+F"
-				checked
-			/><label for="flip-horizontal">${render_access_key(localize("&Flip horizontal"))}</label>
-		</div>
-		<div class="radio-wrapper">
-			<input
-				type="radio"
-				name="flip-or-rotate"
-				id="flip-vertical"
-				value="flip-vertical"
-				aria-keyshortcuts="Alt+V"
-			/><label for="flip-vertical">${render_access_key(localize("Flip &vertical"))}</label>
-		</div>
-		<div class="radio-wrapper">
-			<input
-				type="radio"
-				name="flip-or-rotate"
-				id="rotate-by-angle"
-				value="rotate-by-angle"
-				aria-keyshortcuts="Alt+R"
-			/><label for="rotate-by-angle">${render_access_key(localize("&Rotate by angle"))}</label>
-		</div>
-	`);
-
-	const $rotate_by_angle = $(E("div")).appendTo($fieldset);
-	$rotate_by_angle.addClass("sub-options");
-	for (const label_with_hotkey of [
-		"&90°",
-		"&180°",
-		"&270°",
-	]) {
-		const degrees = parseInt(AccessKeys.toText(label_with_hotkey), 10);
-		$rotate_by_angle.append(`
-			<div class="radio-wrapper">
-				<input
-					type="radio"
-					name="rotate-by-angle"
-					value="${degrees}"
-					id="rotate-${degrees}"
-					aria-keyshortcuts="Alt+${AccessKeys.get(label_with_hotkey).toUpperCase()}"
-				/><label
-					for="rotate-${degrees}"
-				>${render_access_key(label_with_hotkey)}</label>
-			</div>
-		`);
-	}
-	$rotate_by_angle.append(`
-		<div class="radio-wrapper">
-			<input
-				type="radio"
-				name="rotate-by-angle"
-				value="arbitrary"
-			/><input
-				type="number"
-				min="-360"
-				max="360"
-				name="rotate-by-arbitrary-angle"
-				id="custom-degrees"
-				value=""
-				class="no-spinner inset-deep"
-				style="width: 50px"
-			/>
-			<label for="custom-degrees">${localize("Degrees")}</label>
-		</div>
-	`);
-	$rotate_by_angle.find("#rotate-90").attr({ checked: true });
-	// Disabling inputs makes them not even receive mouse events,
-	// and so pointer-events: none is needed to respond to events on the parent.
-	$rotate_by_angle.find("input").attr({ disabled: true });
-	$fieldset.find("input").on("change", () => {
-		const action = $fieldset.find("input[name='flip-or-rotate']:checked").val();
-		$rotate_by_angle.find("input").attr({
-			disabled: action !== "rotate-by-angle",
-		});
-	});
-	$rotate_by_angle.find(".radio-wrapper").on("click", (e) => {
-		// Select "Rotate by angle" and enable subfields
-		$fieldset.find("input[value='rotate-by-angle']").prop("checked", true);
-		$fieldset.find("input").triggerHandler("change");
-
-		const $wrapper = $(e.target).closest(".radio-wrapper");
-		// Focus the numerical input if this field has one
-		const num_input = $wrapper.find("input[type='number']")[0];
-		if (num_input) {
-			num_input.focus();
-		}
-		// Select the radio for this field
-		$wrapper.find("input[type='radio']").prop("checked", true);
-	});
-
-	$fieldset.find("input[name='rotate-by-arbitrary-angle']").on("input", () => {
-		$fieldset.find("input[value='rotate-by-angle']").prop("checked", true);
-		$fieldset.find("input[value='arbitrary']").prop("checked", true);
-	});
-
-	$w.$Button(localize("OK"), () => {
-		const action = $fieldset.find("input[name='flip-or-rotate']:checked").val();
-		switch (action) {
-			case "flip-horizontal":
-				flip_horizontal();
-				break;
-			case "flip-vertical":
-				flip_vertical();
-				break;
-			case "rotate-by-angle": {
-				let angle_val = $fieldset.find("input[name='rotate-by-angle']:checked").val();
-				if (angle_val === "arbitrary") {
-					angle_val = $fieldset.find("input[name='rotate-by-arbitrary-angle']").val();
-				}
-				const angle_deg = Number(angle_val);
-				const angle = angle_deg / 360 * TAU;
-
-				if (isNaN(angle)) {
-					please_enter_a_number();
-					return;
-				}
-				rotate(angle);
-				break;
-			}
-		}
-
-		$w.close();
-	}, { type: "submit" });
-	$w.$Button(localize("Cancel"), () => {
-		$w.close();
-	});
-
-	$fieldset.find("input[type='radio']").first().focus();
-
-	$w.center();
-
-	handle_keyshortcuts($w);
-}
-
-function image_stretch_and_skew() {
-	const $w = $DialogWindow(localize("Stretch and Skew"));
-	$w.addClass("stretch-and-skew");
-
-	const $fieldset_stretch = $(E("fieldset")).appendTo($w.$main);
-	$fieldset_stretch.append(`<legend>${localize("Stretch")}</legend><table></table>`);
-	const $fieldset_skew = $(E("fieldset")).appendTo($w.$main);
-	$fieldset_skew.append(`<legend>${localize("Skew")}</legend><table></table>`);
-
-	const $RowInput = ($table, img_src, label_with_hotkey, default_value, label_unit, min, max) => {
-		const $tr = $(E("tr")).appendTo($table);
-		const $img = $(E("img")).attr({
-			src: `images/transforms/${img_src}.png`,
-			width: 32,
-			height: 32,
-		}).css({
-			marginRight: "20px",
-		});
-		const input_id = ("input" + Math.random() + Math.random()).replace(/\./, "");
-		const $input = $(E("input")).attr({
-			type: "number",
-			min,
-			max,
-			value: default_value,
-			id: input_id,
-			"aria-keyshortcuts": `Alt+${AccessKeys.get(label_with_hotkey).toUpperCase()}`,
-		}).css({
-			width: "40px",
-		}).addClass("no-spinner inset-deep");
-		$(E("td")).appendTo($tr).append($img);
-		$(E("td")).appendTo($tr).append($(E("label")).html(render_access_key(label_with_hotkey)).attr("for", input_id));
-		$(E("td")).appendTo($tr).append($input);
-		$(E("td")).appendTo($tr).text(label_unit);
-
-		return $input;
-	};
-
-	const stretch_x = $RowInput($fieldset_stretch.find("table"), "stretch-x", localize("&Horizontal:"), 100, "%", 1, 5000);
-	const stretch_y = $RowInput($fieldset_stretch.find("table"), "stretch-y", localize("&Vertical:"), 100, "%", 1, 5000);
-	const skew_x = $RowInput($fieldset_skew.find("table"), "skew-x", localize("H&orizontal:"), 0, localize("Degrees"), -90, 90);
-	const skew_y = $RowInput($fieldset_skew.find("table"), "skew-y", localize("V&ertical:"), 0, localize("Degrees"), -90, 90);
-
-	$w.$Button(localize("OK"), () => {
-		const x_scale = parseFloat(stretch_x.val()) / 100;
-		const y_scale = parseFloat(stretch_y.val()) / 100;
-		const h_skew = parseFloat(skew_x.val()) / 360 * TAU;
-		const v_skew = parseFloat(skew_y.val()) / 360 * TAU;
-		if (isNaN(x_scale) || isNaN(y_scale) || isNaN(h_skew) || isNaN(v_skew)) {
-			please_enter_a_number();
-			return;
-		}
-		try {
-			stretch_and_skew(x_scale, y_scale, h_skew, v_skew);
-		} catch (exception) {
-			if (exception.name === "NS_ERROR_FAILURE") {
-				// or localize("There is not enough memory or resources to complete operation.")
-				show_error_message(localize("Insufficient memory to perform operation."), exception);
-			} else {
-				show_error_message(localize("An unknown error has occurred."), exception);
-			}
-			// @TODO: undo and clean up undoable
-			return;
-		}
-		$w.close();
-	}, { type: "submit" });
-
-	$w.$Button(localize("Cancel"), () => {
-		$w.close();
-	});
-
-	$w.$main.find("input").first().focus().select();
-
-	$w.center();
-
-	handle_keyshortcuts($w);
 }
 
 /**
@@ -4167,65 +3626,13 @@ function sanity_check_blob(blob, okay_callback, magic_number_bytes, magic_wanted
 	}
 }
 
-/**
- * @param {boolean} from_current_document
- */
-function show_multi_user_setup_dialog(from_current_document) {
-	const $w = $DialogWindow();
-	$w.title("Multi-User Setup").addClass("horizontal-buttons");
-	$w.$main.html(`
-		${from_current_document ? "<p>This will make the current document public.</p>" : ""}
-		<p>
-			<!-- Choose a name for the multi-user session, included in the URL for sharing: -->
-			Enter the session name that will be used in the URL for sharing:
-		</p>
-		<p>
-			<label>
-				<span class="partial-url-label">jspaint.app/#session:</span>
-				<input
-					type="text"
-					id="session-name"
-					aria-label="session name"
-					pattern="[-0-9A-Za-z\\u00c0-\\u00d6\\u00d8-\\u00f6\\u00f8-\\u02af\\u1d00-\\u1d25\\u1d62-\\u1d65\\u1d6b-\\u1d77\\u1d79-\\u1d9a\\u1e00-\\u1eff\\u2090-\\u2094\\u2184-\\u2184\\u2488-\\u2490\\u271d-\\u271d\\u2c60-\\u2c7c\\u2c7e-\\u2c7f\\ua722-\\ua76f\\ua771-\\ua787\\ua78b-\\ua78c\\ua7fb-\\ua7ff\\ufb00-\\ufb06]+"
-					title="Numbers, letters, and hyphens are allowed."
-					class="inset-deep"
-				>
-			</label>
-		</p>
-	`);
-	const $session_name = $w.$main.find("#session-name");
-	$w.$main.css({ maxWidth: "500px" });
-	$w.$Button("Start", () => {
-		let name = String($session_name.val()).trim();
-
-		if (name == "") {
-			show_error_message("The session name cannot be empty.");
-		} else if ($session_name.is(":invalid")) {
-			show_error_message("The session name must be made from only numbers, letters, and hyphens.");
-		} else {
-			if (from_current_document) {
-				change_url_param("session", name);
-			} else {
-				// @TODO: load new empty session in the same browser tab
-				// (or at least... keep settings like vertical-color-box-mode?)
-				window.open(`${location.origin}${location.pathname}#session:${name}`);
-			}
-			$w.close();
-		}
-	}, { type: "submit" });
-	$w.$Button(localize("Cancel"), () => {
-		$w.close();
-	});
-	$w.center();
-	$session_name.focus();
-}
-
 export {
 	$this_version_news,
+	ADMIN_ONLY_TOOL_IDS,
 	apply_file_format_and_palette_info, are_you_sure, cancel, change_some_url_params, change_url_param, choose_file_to_paste, cleanup_bitmap_view, clear, confirm_overwrite_capability, delete_selection, deselect, detect_monochrome,
-	edit_copy, edit_cut, edit_paste, exit_fullscreen_if_ios, file_load_from_url, file_new, file_open, file_print, file_save,
-	file_save_as, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_opaque, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
-	meld_textbox_into_canvas, open_from_file, open_from_image_info, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_convert_to_black_and_white, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_multi_user_setup_dialog, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
+	edit_copy, edit_cut, edit_paste, exit_fullscreen_if_ios, file_print, file_save,
+	file_save_as, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
+	meld_textbox_into_canvas, open_from_file, open_from_image_info, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
 	toggle_thumbnail, try_exec_command, undo, undoable, update_canvas_rect, update_css_classes_for_conditional_messages, update_disable_aa, update_from_saved_file, update_helper_layer,
 	update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, write_image_file
 };

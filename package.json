@@ -95,6 +95,7 @@
     "@electron-forge/maker-zip": "^7.3.0",
     "@electron-forge/publisher-github": "^7.3.0",
     "@eslint/js": "^9.4.0",
+    "@playwright/test": "^1.63.0",
     "@reforged/maker-appimage": "^5.2.0",
     "@stylistic/eslint-plugin": "^2.1.0",
     "@types/dom-speech-recognition": "^0.0.4",
@@ -133,6 +134,8 @@
     "update-localization": "node ./localization/preprocess.js",
     "update-cli-docs": "node ./scripts/update-cli-docs.js",
     "sync-os-gui": "node ./sync-package.js os-gui && git apply --ignore-whitespace ./lib/os-gui.patch && npm run build-css",
+    "postinstall": "node scripts/generate-multiplayer-config.js && node scripts/generate-cursor-images-manifest.js",
+    "predev": "node scripts/generate-multiplayer-config.js && node scripts/generate-cursor-images-manifest.js",
     "dev": "run-p watch-css dev:start-server",
     "dev:start-server": "live-server --port=1999 --ignorePattern=\"(node_modules|cypress|out)[/\\\\\\\\]|package\\.json|cypress\\.json\"",
     "dev:start-server:NOTE": "@XXX: the octuple backlash ends up meaning a single backslash on Linux, two backslashes on Windows. In this case it's fine because it's in a regexp character class so the extra is redundant and doesn't cause an error.",
@@ -142,7 +145,9 @@
     "cy:run": "cypress run",
     "cy:accept": "cypress run --env updateSnapshots=true",
     "test": "start-server-and-test test:start-server http://localhost:11822 cy:run",
-    "accept": "start-server-and-test test:start-server http://localhost:11822 cy:accept"
+    "accept": "start-server-and-test test:start-server http://localhost:11822 cy:accept",
+    "pw:test": "playwright test",
+    "pw:ui": "playwright test --ui"
   },
   "repository": {
     "type": "git",

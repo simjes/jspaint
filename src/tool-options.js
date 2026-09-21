@@ -1,5 +1,5 @@
 // @ts-check
-/* global stroke_size:writable, airbrush_size:writable, brush_shape:writable, brush_size:writable, eraser_size:writable, magnification:writable, tool_transparent_mode:writable */
+/* global stroke_size:writable, airbrush_size:writable, brush_shape:writable, brush_size:writable, eraser_size:writable, magnification:writable */
 import { set_magnification } from "./functions.js";
 import { $G, E, make_canvas } from "./helpers.js";
 import { render_brush, replace_colors_with_swatch, stamp_brush_canvas } from "./image-manipulation.js";
@@ -393,31 +393,8 @@ const $choose_airbrush_size = $Choose(
 	true,
 ).addClass("choose-airbrush-size");
 
-const $choose_transparent_mode = $Choose(
-	[false, true],
-	(option, _is_chosen, _reuse_canvas, reuse_div) => {
-		const sw = 35, sh = 23; // width, height from source image
-		const b = 2; // margin by which the source image is inset on the destination
-		return ChooserDiv(
-			"transparent-mode-option",
-			false, // never invert it
-			b + sw + b, b + sh + b, // width, height of created destination canvas
-			0, option ? 22 : 0, sw, sh, // x, y, width, height from source image
-			b, b, sw, sh, // x, y, width, height on created destination canvas
-			reuse_div,
-			option, // shift y by 1px in modern theme only, for lower image; border is separate in modern theme, but shared in classic theme
-		);
-	},
-	(option) => {
-		tool_transparent_mode = option;
-	},
-	(option) => option === tool_transparent_mode,
-	true,
-).addClass("choose-transparent-mode");
-
-
 export {
 	$ChooseShapeStyle, $choose_airbrush_size, $choose_brush,
-	$choose_eraser_size, $choose_magnification, $choose_stroke_size, $choose_transparent_mode
+	$choose_eraser_size, $choose_magnification, $choose_stroke_size
 };
 
