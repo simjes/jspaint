@@ -2,8 +2,9 @@
 /* global $canvas, $left, $right, $status_text, get_direction, localize, main_canvas, return_to_tools, selected_tool, selected_tools */
 import { $Component } from "./$Component.js";
 // import { get_direction, localize } from "./app-localization.js";
-import { select_tool, select_tools } from "./functions.js";
-import { $G, E, make_css_cursor } from "./helpers.js";
+import { ADMIN_ONLY_TOOL_IDS, select_tool, select_tools } from "./functions.js";
+import { $G, E, is_admin_connection, is_multiplayer_mode, make_css_cursor } from "./helpers.js";
+import { CURSOR_IMAGE_DIR, getLocalCursorImage, showCursorImagePicker } from "./multiplayer-cursors.js";
 import { get_theme } from "./theme.js";
 
 
@@ -89,6 +90,55 @@ function $ToolBox(tools, is_extras) {
 		return $b[0];
 	}));
 
+	const update_admin_only_tools = () => {
+		for (const tool of tools) {
+			if (ADMIN_ONLY_TOOL_IDS.has(tool.id)) {
+				tool.$button.toggleClass("admin-only-disabled", is_multiplayer_mode && !is_admin_connection);
+			}
+		}
+	};
+	update_admin_only_tools();
+	$G.on("admin-status-changed", update_admin_only_tools);
+
+	// Shows what everyone else currently sees at this user's cursor, and
+	// doubles as a shortcut to the same picker as Extras > Choose Cursor
+	// Image. Only meaningful on the shared canvas, and only in the main
+	// toolbox (an "Extra Tools" box wouldn't need its own copy of this).
+	const $cursor_preview = $(E("div")).addClass("cursor-preview-tool inset-deep");
+	const $cursor_preview_img = $(E("img")).attr("alt", "").appendTo($cursor_preview);
+	const update_cursor_preview = () => {
+		$cursor_preview_img.attr("src", CURSOR_IMAGE_DIR + getLocalCursorImage());
+	};
+	update_cursor_preview();
+	$cursor_preview.attr("title", localize("Choose Cursor Image"));
+	$cursor_preview.on("click", () => {
+		showCursorImagePicker();
+	});
+	$cursor_preview.on("pointerenter", () => {
+		const show_tooltip = () => {
+			showing_tooltips = true;
+			$status_text.text(localize("Picks what other people see at your cursor on the shared canvas."));
+		};
+		if (showing_tooltips) {
+			show_tooltip();
+		} else {
+			const tid = setTimeout(show_tooltip, 300);
+			$cursor_preview.one("pointerleave", () => {
+				clearTimeout(tid);
+			});
+		}
+	});
+	$cursor_preview.on("pointerleave", () => {
+		showing_tooltips = false;
+		$status_text.default();
+	});
+	if (!is_extras) {
+		$G.on("cursor-image-changed", update_cursor_preview);
+	}
+	if (!is_multiplayer_mode || is_extras) {
+		$cursor_preview.hide();
+	}
+
 	/**
 	 * @typedef {Object} I$ToolBox
 	 * @prop {() => void} update_selected_tool
@@ -98,7 +148,7 @@ function $ToolBox(tools, is_extras) {
 		is_extras ? "Extra Tools" : localize("Tools"),
 		is_extras ? "tools-component extra-tools-component" : "tools-component",
 		"tall",
-		$tools.add($tool_options)
+		$tools.add($tool_options).add($cursor_preview)
 	));
 	$c.appendTo(get_direction() === "rtl" ? $right : $left); // opposite ColorBox by default
 	$c.update_selected_tool = () => {

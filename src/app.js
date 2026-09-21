@@ -9,12 +9,13 @@ import { Handles } from "./Handles.js";
 // import { get_direction, localize } from "./app-localization.js";
 import { default_palette, get_winter_palette } from "./color-data.js";
 import { image_formats } from "./file-format-data.js";
-import { $this_version_news, cancel, change_some_url_params, change_url_param, clear, confirm_overwrite_capability, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_new, file_open, file_save, file_save_as, get_tool_by_id, get_uris, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, make_or_update_undoable, open_from_file, paste, paste_image_from_file, redo, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, save_as_prompt, select_all, select_tool, select_tools, set_magnification, show_document_history, show_error_message, show_news, show_resource_load_error_message, toggle_grid, undo, update_canvas_rect, update_disable_aa, update_helper_layer, update_magnified_canvas_size, view_bitmap, write_image_file } from "./functions.js";
+import { $this_version_news, cancel, change_some_url_params, change_url_param, clear, confirm_overwrite_capability, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_save, file_save_as, get_tool_by_id, get_uris, load_image_from_uri, make_or_update_undoable, open_from_file, paste, paste_image_from_file, redo, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, save_as_prompt, select_all, select_tool, select_tools, set_magnification, show_document_history, show_error_message, show_news, show_resource_load_error_message, toggle_grid, undo, update_canvas_rect, update_disable_aa, update_helper_layer, update_magnified_canvas_size, view_bitmap, write_image_file } from "./functions.js";
 import { show_help } from "./help.js";
-import { $G, E, TAU, get_file_extension, get_help_folder_icon, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
+import { $G, E, TAU, get_file_extension, get_help_folder_icon, is_discord_embed, is_multiplayer_mode, make_canvas, to_canvas_coords } from "./helpers.js";
 import { init_webgl_stuff, rotate } from "./image-manipulation.js";
 import { menus } from "./menus.js";
 import { showMessageBox } from "./msgbox.js";
+import { is_connected as is_multiplayer_connected } from "./multiplayer-client.js";
 import { stopSimulatingGestures } from "./simulate-random-gestures.js";
 import { disable_speech_recognition, enable_speech_recognition, trace_and_sketch_stop } from "./speech-recognition.js";
 import { localStore } from "./storage.js";
@@ -1103,19 +1104,15 @@ $G.on("keydown", (e) => {
 				break;
 			case "G":
 				if (e.shiftKey) {
-					render_history_as_gif();
-				} else {
-					toggle_grid();
+					return; // Ctrl+Shift+G: Render History As GIF has been removed; don't intercept
 				}
+				toggle_grid();
 				break;
 			case "F":
 				// @ts-ignore (repeat doesn't exist on jQuery.Event, I guess, but this is fine)
 				if (!e.repeat && !e.originalEvent?.repeat) {
 					view_bitmap();
 				}
-				break;
-			case "O":
-				file_open();
 				break;
 			case "S":
 				if (e.shiftKey) {
@@ -1127,12 +1124,6 @@ $G.on("keydown", (e) => {
 			case "A":
 				select_all();
 				break;
-			case "I":
-				image_invert_colors();
-				break;
-			case "E":
-				image_attributes();
-				break;
 
 			// These shortcuts are mostly reserved by browsers,
 			// but they are allowed in Electron.
@@ -1140,24 +1131,11 @@ $G.on("keydown", (e) => {
 			// to prevent accidental closing/refreshing.
 			// I'm supporting Alt+<shortcut> here (implicitly) as a workaround (and showing this in the menus in some cases).
 			// Also, note that Chrome allows some shortcuts to be overridden in fullscreen (but showing/hiding the shortcuts would be confusing).
-			case "N":
-				if (e.shiftKey) {
-					clear();
-				} else {
-					file_new();
-				}
-				break;
 			case "T":
 				$toolbox.toggle();
 				break;
 			case "L": // allowed to override in Firefox
 				$colorbox.toggle();
-				break;
-			case "R":
-				image_flip_and_rotate();
-				break;
-			case "W":
-				image_stretch_and_skew();
 				break;
 
 			default:
@@ -1298,13 +1276,24 @@ set_magnification(default_magnification);
 
 // this is synchronous for now, but @TODO: handle possibility of loading a document before callback
 // when switching to asynchronous storage, e.g. with localforage
-localStore.get({
+//
+// In multiplayer mode the canvas size is fixed (see resize_canvas_without_saving_dimensions),
+// so it's not read from localStorage here either - a visitor's browser may
+// have a leftover width/height saved from a previous, unrelated visit, and
+// everyone needs to land on the same fixed size regardless.
+if (is_multiplayer_mode) {
+	my_canvas_width = default_canvas_width;
+	my_canvas_height = default_canvas_height;
+}
+localStore.get(is_multiplayer_mode ? {} : {
 	width: default_canvas_width,
 	height: default_canvas_height,
 }, (err, stored_values) => {
 	if (err) { return; }
-	my_canvas_width = Number(stored_values.width);
-	my_canvas_height = Number(stored_values.height);
+	if (!is_multiplayer_mode) {
+		my_canvas_width = Number(stored_values.width);
+		my_canvas_height = Number(stored_values.height);
+	}
 
 	make_or_update_undoable({
 		match: (history_node) => history_node.name === localize("New"),
@@ -1797,6 +1786,7 @@ window.api_for_cypress_tests = {
 	selected_colors,
 	set_theme,
 	$,
+	get is_multiplayer_connected() { return is_multiplayer_connected; },
 };
 // #endregion
 

@@ -1,0 +1,66 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Generates src/multiplayer-config.js (gitignored, see
+      # scripts/generate-multiplayer-config.js) - PARTYKIT_HOST is the
+      # deployed ggjh2027-multiplayer PartyKit URL (wss://..., a repo
+      # variable, not a secret). MULTIPLAYER_ROOM_ID is optional.
+      - run: npm ci
+        env:
+          PARTYKIT_HOST: ${{ vars.PARTYKIT_HOST }}
+          MULTIPLAYER_ROOM_ID: ${{ vars.MULTIPLAYER_ROOM_ID }}
+
+      - run: npm run lint-tsc
+
+      # No bundler - the whole repo (minus dev/build-only tooling) is the
+      # site, served as-is, same as `npm run dev` does locally. CNAME is
+      # this fork's own custom domain, kept in the deploy.
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          rsync -a \
+            --exclude='.git' --exclude='.github' --exclude='.claude' \
+            --exclude='node_modules' --exclude='_site' \
+            --exclude='cypress' --exclude='playwright' --exclude='scripts' \
+            --exclude='playwright-report' --exclude='test-results' \
+            --exclude='package-lock.json' \
+            ./ _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

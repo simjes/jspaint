@@ -30,8 +30,30 @@ const is_pride_month = new Date().getMonth() === 5; // June (0-based, 0 is Janua
 
 const query_params = new URLSearchParams(window.location.search);
 export const is_discord_embed = query_params.get("frame_id") != null;
+// This build only ever runs as a single shared canvas - there's no per-user
+// document and no singleplayer mode to fall back to. Kept as a named flag
+// (rather than inlining `true` at each call site) so it stays documented
+// wherever it's checked: Undo/Redo/History-navigation rewind the *entire*
+// canvas to a prior full-bitmap snapshot, which would erase whatever other
+// users have painted since, and jspaint's own per-tab/named-session autosave
+// (sessions.js) would otherwise give each visitor their own private document
+// instead of everyone landing in the same one.
+export const is_multiplayer_mode = true;
 
 const $G = $(window);
+
+// Whether *this* connection has been recognized as an admin by the
+// multiplayer server (src/multiplayer-client.js sets this once it hears
+// back after connecting - it's false until then). The server independently
+// enforces this on every incoming patch regardless of what the client shows,
+// so this only controls client-side UI (e.g. hiding the eraser tool);
+// it's not a security boundary by itself.
+export let is_admin_connection = false;
+/** @param {boolean} value */
+export function set_is_admin_connection(value) {
+	is_admin_connection = value;
+	$G.triggerHandler("admin-status-changed");
+}
 
 /**
  * Wrapper for AccessKeys.toHTML that ensures whitespace isn't collapsed in cases like "Fox &Trot" or "Fo&x Trot" where the access key abuts a space.

@@ -1,4 +1,6 @@
 
+> **This is a fork by Hamar Game Events**, turning JS Paint into a permanently-online shared multiplayer canvas - everyone who visits draws on the same canvas in real time. Huge thanks to [1j01](https://github.com/1j01) and everyone else who built and maintains the original JS Paint - this project wouldn't exist without your work. ❤️
+
 # [![](images/icons/32x32.png) JS Paint](https://jspaint.app)
 
 A pixel-perfect web-based MS Paint remake and more... [Try it out!](https://jspaint.app)

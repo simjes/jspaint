@@ -1,0 +1,6 @@
+@import "./classic.css";
+@import "../../lib/os-gui/build/peggys-pastels.css";
+
+:root {
+	--theme-loaded: "peggys-pastels.css";
+}

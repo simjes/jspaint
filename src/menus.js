@@ -1,48 +1,34 @@
 // @ts-check
-/* global tool_transparent_mode:writable, palette:writable, show_font_box:writable */
+/* global palette:writable, show_font_box:writable */
 /* global $canvas_area, $colorbox, $status_area, $toolbox, available_languages, get_iso_language_name, get_language, get_language_emoji, get_language_endonym, localize, magnification, main_canvas, menu_bar, MENU_DIVIDER, redos, selection, set_language, show_grid, show_thumbnail, systemHooks, textbox, undos */
 // import { available_languages, get_iso_language_name, get_language, get_language_emoji, get_language_endonym, localize, set_language } from "./app-localization.js";
 import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 import { show_edit_colors_window } from "./edit-colors.js";
 import { palette_formats } from "./file-format-data.js";
-import { are_you_sure, change_url_param, choose_file_to_paste, clear, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_load_from_url, file_new, file_open, file_print, file_save, file_save_as, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, redo, render_history_as_gif, sanity_check_blob, save_selection_to_file, select_all, set_magnification, show_about_paint, show_custom_zoom_window, show_document_history, show_file_format_errors, show_multi_user_setup_dialog, show_news, toggle_grid, toggle_thumbnail, undo, view_bitmap } from "./functions.js";
+import { are_you_sure, change_url_param, choose_file_to_paste, delete_selection, edit_copy, edit_cut, edit_paste, file_print, file_save, file_save_as, redo, sanity_check_blob, save_selection_to_file, select_all, set_magnification, show_about_paint, show_custom_zoom_window, show_document_history, show_file_format_errors, show_news, toggle_grid, toggle_thumbnail, undo } from "./functions.js";
 import { show_help } from "./help.js";
-import { $G, get_rgba_from_color, is_discord_embed } from "./helpers.js";
-import { show_imgur_uploader } from "./imgur.js";
-import { manage_storage } from "./manage-storage.js";
+import { get_rgba_from_color, is_admin_connection, is_discord_embed, is_multiplayer_mode } from "./helpers.js";
 import { showMessageBox } from "./msgbox.js";
-import { simulateRandomGesturesPeriodically, simulatingGestures, stopSimulatingGestures } from "./simulate-random-gestures.js";
-import { speech_recognition_active, speech_recognition_available } from "./speech-recognition.js";
+import { showCursorImagePicker } from "./multiplayer-cursors.js";
 import { get_theme, set_theme } from "./theme.js";
 
-const looksLikeChrome = !!(window.chrome && (window.chrome.loadTimes || window.chrome.csi));
-// NOTE: Microsoft Edge includes window.chrome.app
-// (also this browser detection logic could likely use some more nuance)
+/**
+ * Opens an external link in a new tab without a `Referer` header or an
+ * `opener` reference back to this page. Some sites (Discord invites, in
+ * particular) reject requests that carry a referrer from an unrecognized
+ * external site as an anti-scraping measure - a plain `window.open(url)`
+ * sends one, while typing the URL directly (or a right-click "open in new
+ * tab") doesn't, which is why the two can behave differently for the same
+ * link.
+ * @param {string} url
+ */
+function open_external_link(url) {
+	window.open(url, "_blank", "noopener,noreferrer");
+}
 
 /** @type {OSGUITopLevelMenus} */
 const menus = {
 	[localize("&File")]: [
-		{
-			label: localize("&New"),
-			...shortcut(window.is_electron_app ? "Ctrl+N" : "Ctrl+Alt+N"), // Ctrl+N opens a new browser window
-			speech_recognition: [
-				"new", "new file", "new document", "create new document", "create a new document", "start new document", "start a new document",
-			],
-			action: () => { file_new(); },
-			description: localize("Creates a new document."),
-		},
-		{
-			label: localize("&Open"),
-			...shortcut("Ctrl+O"),
-			speech_recognition: [
-				"open", "open document", "open file", "open an image file", "open a document", "open a file",
-				"load document", "load a document", "load an image file", "load an image",
-				"show file picker", "show file chooser", "show file browser", "show finder",
-				"browser for file", "browse for a file", "browse for an image", "browse for an image file",
-			],
-			action: () => { file_open(); },
-			description: localize("Opens an existing document."),
-		},
 		{
 			label: localize("&Save"),
 			...shortcut("Ctrl+S"),
@@ -75,75 +61,6 @@ const menus = {
 			],
 			action: () => { file_save_as(); },
 			description: localize("Saves the active document with a new name."),
-		},
-		MENU_DIVIDER,
-		{
-			label: localize("&Load From URL"),
-			// shortcut: "", // no shortcut: Ctrl+L is taken, and you can paste a URL with Ctrl+V, so it's not really needed
-			speech_recognition: [
-				"load from url",
-				"load from a url",
-				"load from address",
-				"load from an address",
-				"load from a web address",
-				// this is ridiculous
-				// this would be really simple in JSGF format
-				"load an image from a URL",
-				"load an image from an address",
-				"load an image from a web address",
-				"load image from a URL",
-				"load image from an address",
-				"load image from a web address",
-				"load an image from URL",
-				"load an image from address",
-				"load an image from web address",
-				"load image from URL",
-				"load image from address",
-				"load image from web address",
-
-				"load an picture from a URL",
-				"load an picture from an address",
-				"load an picture from a web address",
-				"load picture from a URL",
-				"load picture from an address",
-				"load picture from a web address",
-				"load an picture from URL",
-				"load an picture from address",
-				"load an picture from web address",
-				"load picture from URL",
-				"load picture from address",
-				"load picture from web address",
-			],
-			action: () => { file_load_from_url(); },
-			description: localize("Opens an image from the web."),
-		},
-		{
-			label: localize("&Upload To Imgur"),
-			speech_recognition: [
-				"upload to imgur", "upload image to imgur", "upload picture to imgur",
-			],
-			action: () => {
-				// include the selection in the saved image
-				deselect();
-
-				main_canvas.toBlob((blob) => {
-					sanity_check_blob(blob, () => {
-						show_imgur_uploader(blob);
-					});
-				});
-			},
-			description: localize("Uploads the active document to Imgur"),
-		},
-		MENU_DIVIDER,
-		{
-			label: localize("Manage Storage"),
-			speech_recognition: [
-				"manage storage", "show storage", "open storage window", "manage sessions", "show sessions", "show local sessions", "local sessions", "storage manager", "show storage manager", "open storage manager",
-				"show autosaves", "show saves", "show saved documents", "show saved files", "show saved pictures", "show saved images", "show local storage",
-				"autosaves", "autosave", "saved documents", "saved files", "saved pictures", "saved images", "local storage",
-			],
-			action: () => { manage_storage(); },
-			description: localize("Manages storage of previously created or opened pictures."),
 		},
 		MENU_DIVIDER,
 		{
@@ -278,9 +195,11 @@ const menus = {
 			speech_recognition: [
 				"undo", "undo that",
 			],
-			enabled: () => undos.length >= 1,
+			enabled: () => !is_multiplayer_mode && undos.length >= 1,
 			action: () => { undo(); },
-			description: localize("Undoes the last action."),
+			description: is_multiplayer_mode ?
+				localize("Not available on a shared canvas, since it would undo other people's work too.") :
+				localize("Undoes the last action."),
 		},
 		{
 			label: localize("&Repeat"),
@@ -288,9 +207,11 @@ const menus = {
 			speech_recognition: [
 				"repeat", "redo",
 			],
-			enabled: () => redos.length >= 1,
+			enabled: () => !is_multiplayer_mode && redos.length >= 1,
 			action: () => { redo(); },
-			description: localize("Redoes the previously undone action."),
+			description: is_multiplayer_mode ?
+				localize("Not available on a shared canvas, since it would redo over other people's work too.") :
+				localize("Redoes the previously undone action."),
 		},
 		{
 			label: localize("&History"),
@@ -298,8 +219,11 @@ const menus = {
 			speech_recognition: [
 				"show history", "history",
 			],
+			enabled: () => !is_multiplayer_mode,
 			action: () => { show_document_history(); },
-			description: localize("Shows the document history and lets you navigate to states not accessible with Undo or Repeat."),
+			description: is_multiplayer_mode ?
+				localize("Not available on a shared canvas, since navigating history would rewind other people's work too.") :
+				localize("Shows the document history and lets you navigate to states not accessible with Undo or Repeat."),
 		},
 		MENU_DIVIDER,
 		{
@@ -338,11 +262,13 @@ const menus = {
 			],
 			enabled: () =>
 				// @TODO: disable if nothing in clipboard or wrong type (if we can access that)
-				true,
+				!is_multiplayer_mode || is_admin_connection,
 			action: () => {
 				edit_paste(true);
 			},
-			description: localize("Inserts the contents of the Clipboard."),
+			description: (!is_multiplayer_mode || is_admin_connection) ?
+				localize("Inserts the contents of the Clipboard.") :
+				localize("Only an admin can paste images."),
 		},
 		{
 			label: localize("C&lear Selection"),
@@ -362,8 +288,11 @@ const menus = {
 				"select the whole image", "select the whole picture", "select the whole drawing", "select the whole canvas", "select the whole document",
 				"select the entire image", "select the entire picture", "select the entire drawing", "select the entire canvas", "select the entire document",
 			],
+			enabled: () => !is_multiplayer_mode || is_admin_connection,
 			action: () => { select_all(); },
-			description: localize("Selects everything."),
+			description: (!is_multiplayer_mode || is_admin_connection) ?
+				localize("Selects everything.") :
+				localize("Only an admin can use the %1 tool.", "Select"),
 		},
 		MENU_DIVIDER,
 		{
@@ -384,8 +313,11 @@ const menus = {
 			speech_recognition: [
 				"paste a file", "paste from a file", "insert a file", "insert an image file",
 			],
+			enabled: () => !is_multiplayer_mode || is_admin_connection,
 			action: () => { choose_file_to_paste(); },
-			description: localize("Pastes a file into the selection."),
+			description: (!is_multiplayer_mode || is_admin_connection) ?
+				localize("Pastes a file into the selection.") :
+				localize("Only an admin can paste images."),
 		},
 	],
 	[localize("&View")]: [
@@ -563,19 +495,6 @@ const menus = {
 				},
 			],
 		},
-		{
-			label: localize("&View Bitmap"),
-			...shortcut("Ctrl+F"),
-			speech_recognition: [
-				"view bitmap", "show bitmap",
-				"fullscreen", "full-screen", "full screen",
-				"show picture fullscreen", "show picture full-screen", "show picture full screen",
-				"show image fullscreen", "show image full-screen", "show image full screen",
-				// @TODO: exit fullscreen
-			],
-			action: () => { view_bitmap(); },
-			description: localize("Displays the entire picture."),
-		},
 		MENU_DIVIDER,
 		{
 			label: localize("&Fullscreen"),
@@ -606,100 +525,6 @@ const menus = {
 				},
 			},
 			description: localize("Makes the application take up the entire screen."),
-		},
-	],
-	[localize("&Image")]: [
-		// @TODO: speech recognition: terms that apply to selection
-		{
-			label: localize("&Flip/Rotate"),
-			...shortcut((window.is_electron_app && !window.electron_is_dev) ? "Ctrl+R" : "Ctrl+Alt+R"), // Ctrl+R reloads the browser tab (or Electron window in dev mode via electron-debug)
-			speech_recognition: [
-				"flip",
-				"rotate",
-				"flip/rotate", "flip slash rotate", "flip and rotate", "flip or rotate", "flip rotate",
-				// @TODO: parameters to command
-			],
-			action: () => { image_flip_and_rotate(); },
-			description: localize("Flips or rotates the picture or a selection."),
-		},
-		{
-			label: localize("&Stretch/Skew"),
-			...shortcut(window.is_electron_app ? "Ctrl+W" : "Ctrl+Alt+W"), // Ctrl+W closes the browser tab
-			speech_recognition: [
-				"stretch", "scale", "resize image",
-				"skew",
-				"stretch/skew", "stretch slash skew", "stretch and skew", "stretch or skew", "stretch skew",
-				// @TODO: parameters to command
-			],
-			action: () => { image_stretch_and_skew(); },
-			description: localize("Stretches or skews the picture or a selection."),
-		},
-		{
-			label: localize("&Invert Colors"),
-			...shortcut("Ctrl+I"),
-			speech_recognition: [
-				"invert",
-				"invert colors",
-				"invert image", "invert picture", "invert drawing",
-				"invert image colors", "invert picture colors", "invert drawing colors",
-				"invert colors of image", "invert colors of picture", "invert colors of drawing",
-			],
-			action: () => { image_invert_colors(); },
-			description: localize("Inverts the colors of the picture or a selection."),
-		},
-		{
-			label: `${localize("&Attributes")}...`,
-			...shortcut("Ctrl+E"),
-			speech_recognition: [
-				"attributes", "image attributes", "picture attributes", "image options", "picture options",
-				"dimensions", "image dimensions", "picture dimensions",
-				"resize canvas", "resize document", "resize page", // not resize image/picture because that implies scaling, handled by Stretch/Skew
-				"set image size", "set picture size", "set canvas size", "set document size", "set page size",
-				"image size", "picture size", "canvas size", "document size", "page size",
-				"configure image size", "configure picture size", "configure canvas size", "configure document size", "configure page size",
-			],
-			action: () => { image_attributes(); },
-			description: localize("Changes the attributes of the picture."),
-		},
-		{
-			label: localize("&Clear Image"),
-			...shortcut((window.is_electron_app || !looksLikeChrome) ? "Ctrl+Shift+N" : ""), // Ctrl+Shift+N opens incognito window in chrome
-			speech_recognition: [
-				"clear image", "clear canvas", "clear picture", "clear page", "clear drawing",
-				// @TODO: erase?
-			],
-			// (mspaint says "Ctrl+Shft+N")
-			action: () => { if (!selection) { clear(); } },
-			enabled: () => !selection,
-			description: localize("Clears the picture."),
-			// action: ()=> {
-			// 	if (selection) {
-			// 		delete_selection();
-			// 	} else {
-			// 		clear();
-			// 	}
-			// },
-			// mspaint says localize("Clears the picture or selection."), but grays out the option when there's a selection
-		},
-		{
-			label: localize("&Draw Opaque"),
-			speech_recognition: [
-				"toggle draw opaque",
-				"toggle transparent selection", "toggle transparent selections",
-				"toggle transparent selection mode", "toggle transparent selections mode",
-				"toggle opaque selection", "toggle opaque selections",
-				"toggle opaque selection mode", "toggle opaque selections mode",
-				// toggle opaque? toggle opacity?
-				// @TODO: hide/show / "draw opaque" / "draw transparent"/translucent?
-			],
-			checkbox: {
-				toggle: () => {
-					tool_transparent_mode = !tool_transparent_mode;
-					$G.trigger("option-changed");
-				},
-				check: () => !tool_transparent_mode,
-			},
-			description: localize("Makes the current selection either opaque or transparent."),
 		},
 	],
 	[localize("&Colors")]: [
@@ -794,46 +619,12 @@ const menus = {
 		},
 	],
 	[localize("E&xtras")]: [
-		{
-			emoji_icon: "⌚",
-			label: localize("&History"),
-			...shortcut("Ctrl+Shift+Y"),
-			speech_recognition: [
-				// This is a duplicate menu item (for easy access), so it doesn't need speech recognition data here.
-			],
-			action: () => { show_document_history(); },
-			description: localize("Shows the document history and lets you navigate to states not accessible with Undo or Repeat."),
-		},
-		{
-			emoji_icon: "🎞️",
-			label: localize("&Render History As GIF"),
-			...shortcut("Ctrl+Shift+G"),
-			speech_recognition: [
-				// @TODO: animated gif, blah
-				"render history as gif", "render history as a gif", "render history animation", "make history animation", "make animation of history", "make animation of document history", "make animation from document history",
-				"render a gif from the history", "render a gif animation from the history", "render an animation from the history",
-				"make a gif from the history", "make a gif animation from the history", "make an animation from the history",
-				"create a gif from the history", "create a gif animation from the history", "create an animation from the history",
-				// aaaaaaaaaaaaaaaaaaaaaaaaaa *exponentially explodes*
-				"make a gif", "make a gif of the history", "make a gif of the document history", "make a gif from the document history",
-				"create a gif", "create a gif of the history", "create a gif of the document history", "create a gif from the document history",
-				"make gif", "make gif of the history", "make gif of the document history", "make gif from the document history",
-				"create gif", "create gif of the history", "create gif of the document history", "create gif from the document history",
-				"make an animation", "make an animation of the history", "make an animation of the document history", "make an animation from the document history",
-				"create an animation", "create an animation of the history", "create an animation of the document history", "create an animation from the document history",
-				"make animation", "make animation of the history", "make animation of the document history", "make animation from the document history",
-				"create animation", "create animation of the history", "create animation of the document history", "create animation from the document history",
-			],
-			action: () => { render_history_as_gif(); },
-			description: localize("Creates an animation from the document history."),
-		},
 		// {
 		// 	label: localize("Render History as &APNG",
 		// 	// shortcut: "Ctrl+Shift+A",
 		// 	action: ()=> { render_history_as_apng(); },
 		// 	description: localize("Creates an animation from the document history."),
 		// },
-		MENU_DIVIDER,
 		// {
 		// 	label: localize("Extra T&ool Box",
 		// 	checkbox: {
@@ -856,117 +647,17 @@ const menus = {
 		// 	description: localize("Configures JS Paint."),
 		// }
 		{
-			emoji_icon: "🤪",
-			label: localize("&Draw Randomly"),
+			emoji_icon: "🖱️",
+			label: localize("Choose &Cursor Image"),
 			speech_recognition: [
-				"draw randomly", "draw pseudorandomly", "draw wildly", "make random art",
+				"choose cursor image", "change cursor image", "set cursor image", "pick cursor image",
+				"choose my cursor", "change my cursor", "customize my cursor", "customize cursor",
 			],
-			checkbox: {
-				toggle: () => {
-					if (simulatingGestures) {
-						stopSimulatingGestures();
-					} else {
-						simulateRandomGesturesPeriodically();
-					}
-				},
-				check: () => {
-					return simulatingGestures;
-				},
+			enabled: () => is_multiplayer_mode,
+			action: () => {
+				showCursorImagePicker();
 			},
-			description: localize("Draws randomly with different tools."),
-		},
-		MENU_DIVIDER,
-		{
-			emoji_icon: "👥",
-			label: localize("&Multi-User"),
-			submenu: [
-				{
-					label: localize("&New Session From Document"),
-					speech_recognition: [
-						"new session from document",
-						"session from document",
-						"online session",
-						"enable multi-user",
-						"enable multiplayer",
-						"start multi-user",
-						"start multiplayer",
-						"start collaboration",
-						"start collaborating",
-						"multi-user mode",
-						"multiplayer mode",
-						"collaboration mode",
-						"collaborative mode",
-						"collaborating mode",
-						"online mode",
-						"go online",
-						"share canvas",
-						"play with friends",
-						"draw with friends",
-						"draw together with friends",
-						"draw together",
-						"multiplayer",
-						"multi-user",
-						"collaborate",
-						"collaboration",
-						"collaborative",
-						"collaborating",
-					],
-					action: () => {
-						show_multi_user_setup_dialog(true);
-					},
-					description: localize("Starts a new multi-user session from the current document."),
-				},
-				{
-					label: localize("New &Blank Session"),
-					speech_recognition: [
-						"new blank session",
-						"new empty session",
-						"new fresh session",
-						"new blank multi-user session",
-						"new empty multi-user session",
-						"new fresh multi-user session",
-						"new blank multiplayer session",
-						"new empty multiplayer session",
-						"new fresh multiplayer session",
-						"new multi-user session",
-						"new multiplayer session",
-						"new collaboration session",
-						"new collaborative session",
-						"start multi-user session",
-						"start multiplayer session",
-						"start collaboration session",
-						"start collaborative session",
-						"start multi-user with a new",
-						"start multiplayer with a new",
-						"start collaboration with a new",
-						"start collaborating with a new",
-						"start multi-user with a blank",
-						"start multiplayer with a blank",
-						"start collaboration with a blank",
-						"start collaborating with a blank",
-						"start multi-user with an empty",
-						"start multiplayer with an empty",
-						"start collaboration with an empty",
-						"start collaborating with an empty",
-						"start multi-user with new",
-						"start multiplayer with new",
-						"start collaboration with new",
-						"start collaborating with new",
-						"start multi-user with blank",
-						"start multiplayer with blank",
-						"start collaboration with blank",
-						"start collaborating with blank",
-						"start multi-user with empty",
-						"start multiplayer with empty",
-						"start collaboration with empty",
-						"start collaborating with empty",
-					],
-					action: () => {
-						show_multi_user_setup_dialog(false);
-					},
-					description: localize("Starts a new multi-user session from an empty document."),
-				},
-			],
+			description: localize("Picks what other people see at your cursor on the shared canvas."),
 		},
 		{
 			emoji_icon: "💄",
@@ -1139,6 +830,20 @@ const menus = {
 					enabled: () => get_theme() != "bubblegum.css",
 					description: localize("Makes JS Paint look like pearlescent bubblegum."),
 				},
+				{
+					emoji_icon: "🌸",
+					label: localize("&Peggy's Pastels"),
+					speech_recognition: [
+						"peggys pastels theme", "peggy's pastels theme", "switch to peggys pastels theme", "use peggys pastels theme", "set theme to peggys pastels", "set theme peggys pastels", "switch theme to peggys pastels", "switch theme peggys pastels",
+						"pastel theme", "switch to pastel theme", "use pastel theme", "set theme to pastel", "set theme pastel", "switch to pastel theme", "switch theme to pastel", "switch theme pastel",
+						"pastels theme", "switch to pastels theme", "use pastels theme", "set theme to pastels", "set theme pastels", "switch to pastels theme", "switch theme to pastels", "switch theme pastels",
+					],
+					action: () => {
+						set_theme("peggys-pastels.css");
+					},
+					enabled: () => get_theme() != "peggys-pastels.css",
+					description: localize("Gives JS Paint a soft pastel color scheme, based on a built-in Windows 98 color scheme."),
+				},
 				// {
 				// 	emoji_icon: "🪐",
 				// 	label: localize("&Retro Futurist"),
@@ -1193,73 +898,6 @@ const menus = {
 			)),
 		},
 		{
-			emoji_icon: "🧑",
-			// label: localize("Head Tracking"),
-			// label: localize("M&ove Cursor With Head"),
-			label: localize("Head Tracker"), // adding (Experimental) makes it too long, "WIP" or "Beta" feels too techy
-			speech_recognition: [
-				"head tracking", "head tracker", "move cursor with head", "control cursor with head", "mouse with head", "mouse cursor with head",
-				"face tracking", "face tracker", "move cursor with face", "control cursor with face", "mouse with face", "mouse cursor with face",
-				"head mouse", "face mouse", "facial mouse",
-				"head cursor", "face cursor", "facial cursor",
-				"head pointer", "face pointer", "facial pointer",
-				"head control", "face control", "facial control",
-				"head movement", "face movement", "facial movement",
-				"head motion", "face motion", "facial motion",
-				"head gestures", "face gestures", "facial gestures",
-				"tracky mouse", // name of the library
-			],
-			checkbox: {
-				toggle: () => {
-					if (/head-tracker/i.test(location.hash)) {
-						change_url_param("head-tracker", false);
-					} else {
-						change_url_param("head-tracker", true);
-					}
-				},
-				check: () => {
-					return /head-tracker/i.test(location.hash);
-				},
-			},
-			description: localize("Controls the cursor with head movements."),
-		},
-		// Later on I'll probably merge the Head Tracker and Dwell Clicker options into a Tracky Mouse option,
-		// or I'll create a preferences screen, where I'll be able to better clarify the relationships between features.
-		{
-			emoji_icon: "⏱️",
-			// label: localize("Dwell &Click"),
-			label: localize("Dwell &Clicker"),
-			speech_recognition: [
-				"dwell clicking", "dwell click", "dwell clicker", "auto click", "auto clicker", "auto clicking", "click automatically",
-				"stop clicking", "stop auto clicking", "stop auto click", "stop auto clicker", "stop dwell clicking", "stop dwell click", "stop dwell clicker",
-			],
-			checkbox: {
-				toggle: () => {
-					if (/head-tracker/i.test(location.hash)) {
-						// @TODO: confirmation dialog that you could cancel with dwell clicking!
-						// Or: make head tracker work independently of dwell clicking, i.e. with facial gestures
-						// if (confirm("This will disable head tracker mode.")) {
-						// change_some_url_params({
-						// 	"head-tracker": false,
-						// 	"dwell-clicker": false,
-						// });
-						// }
-					} else if (/dwell-clicker/i.test(location.hash)) {
-						change_url_param("dwell-clicker", false);
-					} else {
-						change_url_param("dwell-clicker", true);
-					}
-				},
-				check: () => {
-					return /dwell-clicker|head-tracker/i.test(location.hash);
-				},
-			},
-			enabled: () => {
-				return !/head-tracker/i.test(location.hash);
-			},
-			description: localize("Clicks automatically after hovering in one place."),
-		},
-		{
 			emoji_icon: "🔍",
 			// label: localize("&Enlarge Buttons"), // too specific; it also enlarges windows and other UI elements
 			label: localize("&Enlarge UI"), // a bit technical, but hopefully common enough
@@ -1280,27 +918,6 @@ const menus = {
 				},
 			},
 			description: localize("Enlarges buttons, windows, and menus for easier clicking."),
-		},
-		{
-			emoji_icon: "↩️", // doesn't match orientation of the actual button icon's arrow
-			// label: localize("&Floating Undo/Redo Buttons"),
-			// label: localize("Easy Undo/Redo"),
-			// label: localize("Easy &Undo"),
-			// label: localize("Easy &Undo Button"),
-			// label: localize("Floating &Undo"), // it might not always be floating, it might become part of the tool box
-			label: localize("Quick Undo Button"), // a bit long
-			// label: localize("Quick Undo"), // "Quick Undo" also refers to pressing both mouse buttons to cancel an action, not that you can't have multiple ways to "quick undo" if that's the better name
-			speech_recognition: [
-			],
-			checkbox: {
-				toggle: () => {
-					change_url_param("easy-undo", !/easy-undo/i.test(location.hash));
-				},
-				check: () => {
-					return /easy-undo/i.test(location.hash);
-				},
-			},
-			description: localize("Adds a button for undoing the last action."),
 		},
 		{
 			emoji_icon: "↕️",
@@ -1324,38 +941,6 @@ const menus = {
 			},
 			description: localize("Arranges the color box vertically."),
 		},
-		{
-			emoji_icon: "🎙️",
-			label: localize("&Speech Recognition"),
-			speech_recognition: [
-				"toggle speech recognition", "toggle speech recognition mode",
-				"disable speech recognition", "disable speech recognition mode", "turn off speech recognition", "turn off speech recognition mode", "leave speech recognition mode", "exit speech recognition mode",
-			],
-			checkbox: {
-				toggle: () => {
-					if (/speech-recognition-mode/i.test(location.hash)) {
-						change_url_param("speech-recognition-mode", false);
-					} else {
-						change_url_param("speech-recognition-mode", true);
-					}
-				},
-				check: () => {
-					return speech_recognition_active;
-				},
-			},
-			enabled: () => speech_recognition_available,
-			description: localize("Controls the application with voice commands."),
-		},
-		MENU_DIVIDER,
-		{
-			emoji_icon: "🗃️",
-			label: localize("Manage Storage"),
-			speech_recognition: [
-				// This is a duplicate menu item (for easy access), so it doesn't need speech recognition data here.
-			],
-			action: () => { manage_storage(); },
-			description: localize("Manages storage of previously created or opened pictures."),
-		},
 		MENU_DIVIDER,
 		{
 			emoji_icon: "📢",
@@ -1372,32 +957,69 @@ const menus = {
 		},
 		{
 			emoji_icon: "👾", // "👋",
-			label: localize("Discord"),
+			label: localize("JSPaint Discord"),
 			speech_recognition: [
 				"chat on discord", "discord server", "discord community", "join the discord", "join discord", "visit the discord", "visit discord", "discord chat",
 			],
 			action: () => {
-				window.open("https://discord.gg/jxQBK3k8tx");
+				open_external_link("https://discord.com/invite/jxQBK3k8tx");
 			},
 			description: localize("Joins the community on Discord."),
 		},
 		{
 			emoji_icon: "ℹ️",
-			label: localize("GitHub"),
+			label: localize("JSPaint Github"),
 			speech_recognition: [
 				"repo on github", "project on github", "show the source code", "show source code",
 			],
-			action: () => { window.open("https://github.com/1j01/jspaint"); },
+			action: () => { open_external_link("https://github.com/1j01/jspaint"); },
 			description: localize("Shows the project on GitHub."),
 		},
 		{
 			emoji_icon: "💵",
-			label: localize("Donate"),
+			label: localize("Donate to JSPaint Creator"),
 			speech_recognition: [
 				"donate", "make a monetary contribution",
 			],
-			action: () => { window.open("https://www.paypal.me/IsaiahOdhner"); },
+			action: () => { open_external_link("https://www.paypal.me/IsaiahOdhner"); },
 			description: localize("Supports the project."),
+		},
+		MENU_DIVIDER,
+		{
+			emoji_icon: "🎮",
+			label: localize("Global Game Jam Hamar"),
+			speech_recognition: [
+				"global game jam hamar", "game jam hamar", "global game jam",
+			],
+			action: () => { open_external_link("https://gamejam.no/"); },
+			description: localize("Opens the Global Game Jam Hamar website."),
+		},
+		{
+			emoji_icon: "👾",
+			label: localize("Global Game Jam Hamar Discord"),
+			speech_recognition: [
+				"global game jam hamar discord", "game jam hamar discord", "global game jam discord",
+			],
+			action: () => { open_external_link("https://discord.com/invite/4DbxTRNRWN"); },
+			description: localize("Joins the Global Game Jam Hamar Discord."),
+		},
+		{
+			emoji_icon: "🕹️",
+			label: localize("Hamar Game Events"),
+			speech_recognition: [
+				"hamar game events", "game events hamar",
+			],
+			action: () => { open_external_link("https://hamargameevents.no/"); },
+			description: localize("Opens the Hamar Game Events website."),
+		},
+		{
+			emoji_icon: "👾",
+			label: localize("Hamar Game Events Discord"),
+			speech_recognition: [
+				"hamar game events discord", "game events hamar discord",
+			],
+			action: () => { open_external_link("https://discord.com/invite/mNTNeqxJxb"); },
+			description: localize("Joins the Hamar Game Events Discord."),
 		},
 	],
 };

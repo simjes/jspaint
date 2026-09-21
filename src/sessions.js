@@ -5,7 +5,7 @@
 import { $DialogWindow } from "./$ToolWindow.js";
 // import { localize } from "./app-localization.js";
 import { change_url_param, get_uris, load_image_from_uri, open_from_image_info, redo, reset_file, show_error_message, show_resource_load_error_message, undo, undoable, update_title } from "./functions.js";
-import { $G, debounce, get_help_folder_icon, image_data_match, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
+import { $G, debounce, get_help_folder_icon, image_data_match, is_discord_embed, is_multiplayer_mode, make_canvas, to_canvas_coords } from "./helpers.js";
 import { storage_quota_exceeded } from "./manage-storage.js";
 import { showMessageBox } from "./msgbox.js";
 import { localStore } from "./storage.js";
@@ -916,6 +916,12 @@ const end_current_session = () => {
 };
 const generate_session_id = () => (Math.random() * (2 ** 32)).toString(16).replace(".", "");
 const update_session_from_location_hash = () => {
+	// This build has exactly one shared canvas for every visitor. jspaint's
+	// own session system (below) would instead give each visitor a private
+	// autosaved document (#local:<random-id>), or let anyone spin up an
+	// unmanaged, permission-less Firebase session (#session:<name>) - both
+	// contradict "everyone lands in the same session", so neither runs here.
+	if (is_multiplayer_mode) { return; }
 	const session_match = location.hash.match(/^#?(?:.*,)?(session|local):(.*)$/i);
 	const load_from_url_match = location.hash.match(/^#?(?:.*,)?(load):(.*)$/i);
 	if (session_match) {
@@ -999,6 +1005,7 @@ $G.on("hashchange popstate change-url-params", (e) => {
 });
 
 const new_local_session = () => {
+	if (is_multiplayer_mode) { return; } // see update_session_from_location_hash
 	end_current_session();
 	log("Changing URL to start new session...");
 	change_url_param("local", generate_session_id());

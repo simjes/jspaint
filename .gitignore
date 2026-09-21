@@ -19,3 +19,9 @@ Thumbs.db
 
 # temporary files when using git subrepo
 .git-rewrite/
+
+# generated from the PARTYKIT_HOST env var, see scripts/generate-multiplayer-config.js
+src/multiplayer-config.js
+
+# generated from images/cursors/multiplayer/, see scripts/generate-cursor-images-manifest.js
+src/multiplayer-cursor-images.js
